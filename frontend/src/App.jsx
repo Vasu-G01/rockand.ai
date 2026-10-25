@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 
+import * as api from "./api";
 import "./index.css";
 
 const W = 1080;
@@ -64,10 +65,139 @@ export default function App() {
     pausedRef.current = paused;
   }, [paused]);
 
+  /* ---------------- AI pilot (backend) ---------------- */
+  const [aiOn, setAiOn] = useState(false);
+  const [backend, setBackend] = useState("checking"); // online | offline | checking
+  const [model, setModel] = useState(null);           // /api/model info
+  const [training, setTraining] = useState(null);     // /api/train/status
+  const [pilotSource, setPilotSource] = useState("model");
+  const [trainTimesteps, setTrainTimesteps] = useState(500000);
+  const [planLabel, setPlanLabel] = useState(null);
+  const [manualHeld, setManualHeld] = useState(false);
+
+  // the render loop lives in a mount-only effect, so it talks to these refs
+  const aiRef = useRef(false);
+  const controlsRef = useRef({ thrust: false, left: false, right: false });
+  const planRef = useRef([]); // predicted path [{x, y}, ...]
+  const aiClock = useRef(0);
+  const planClock = useRef(0);
+  const needsPlan = useRef(false);
+  const controlBusy = useRef(false);
+  const planBusy = useRef(false);
+  const sourceRef = useRef("model");
+
+  useEffect(() => {
+    aiRef.current = aiOn;
+  }, [aiOn]);
+
+  const toggleAI = () => {
+    const next = !aiOn;
+    if (next) {
+      needsPlan.current = true; // ask the backend for a fresh best path
+      aiClock.current = 0;
+      planClock.current = 0;
+    } else {
+      planRef.current = [];
+      setPlanLabel(null);
+    }
+    setAiOn(next);
+  };
+
+  /** Ask the backend for the next control (falls back to local guidance). */
+  const askControl = (r, pad) => {
+    if (controlBusy.current) return;
+    controlBusy.current = true;
+    const state = api.telemetryState(r);
+    api
+      .predict(state, pad)
+      .then((res) => {
+        controlsRef.current = res.controls;
+        sourceRef.current = res.source;
+        setPilotSource(res.source);
+        setBackend("online");
+      })
+      .catch(() => {
+        controlsRef.current = api.fallbackControl(state, pad);
+        sourceRef.current = "local";
+        setPilotSource("local");
+        setBackend("offline");
+      })
+      .finally(() => {
+        controlBusy.current = false;
+      });
+  };
+
+  /** Ask the backend to roll the policy forward = the predicted "best path". */
+  const askPlan = (r, pad) => {
+    if (planBusy.current) return;
+    planBusy.current = true;
+    api
+      .plan(api.telemetryState(r), pad)
+      .then((res) => {
+        planRef.current = (res.path || []).map(([x, y]) => ({ x, y }));
+        const landing = res.predicted_landing;
+        setPlanLabel(
+          landing
+            ? landing.ok
+              ? "Prediction: soft landing on the pad"
+              : `Prediction: ${landing.message}`
+            : "Prediction: descent in progress"
+        );
+        setBackend("online");
+      })
+      .catch(() => {
+        planRef.current = [];
+        setPlanLabel(null);
+        setBackend("offline");
+      })
+      .finally(() => {
+        planBusy.current = false;
+      });
+  };
+
+  // keep the model / training panels in sync with the backend
+  const trainingRunning = !!(training && training.running);
+  useEffect(() => {
+    let alive = true;
+    const poll = async () => {
+      try {
+        const h = await api.health();
+        if (!alive) return;
+        setBackend("online");
+        setModel(h.model);
+        setTraining(h.training);
+      } catch {
+        if (alive) setBackend("offline");
+      }
+    };
+    poll();
+    const id = setInterval(poll, trainingRunning ? 1000 : 6000);
+    return () => {
+      alive = false;
+      clearInterval(id);
+    };
+  }, [trainingRunning]);
+
+  const startTraining = () => {
+    api
+      .startTraining(trainTimesteps)
+      .then(() => setBackend("online"))
+      .catch(() => setBackend("offline"));
+  };
+  const stopTraining = () => {
+    api.stopTraining().catch(() => {});
+  };
+
   const reset = () => {
     rocket.current = newRocket();
     particles.current = [];
     trail.current = [];
+    controlsRef.current = { thrust: false, left: false, right: false };
+    planRef.current = [];
+    setPlanLabel(null);
+    aiClock.current = 0;
+    planClock.current = 0;
+    needsPlan.current = aiRef.current;
     setHistory([]);
     setPaused(false);
     setTelemetry(initialTelemetry);
@@ -77,11 +207,13 @@ export default function App() {
     const down = (e) => {
       keys.current[e.code] = true;
       if (["ArrowUp", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
+      if (CONTROL_KEYS.includes(e.code)) setManualHeld(true); // keys beat the autopilot
       if (e.code === "KeyR") reset();
       if (e.code === "KeyP") setPaused((v) => !v);
     };
     const up = (e) => {
       keys.current[e.code] = false;
+      if (CONTROL_KEYS.includes(e.code)) setManualHeld(false);
     };
     window.addEventListener("keydown", down);
     window.addEventListener("keyup", up);
@@ -128,9 +260,38 @@ export default function App() {
       /* ---------- physics (unchanged from your version) ---------- */
       if (!isPaused && r.status === "FLYING") {
         const k = keys.current;
-        const thrusting = k.Space || k.ArrowUp || k.KeyW;
-        const left = k.ArrowLeft || k.KeyA;
-        const right = k.ArrowRight || k.KeyD;
+        const manualKeys =
+          k.Space || k.ArrowUp || k.KeyW || k.ArrowLeft || k.KeyA || k.ArrowRight || k.KeyD;
+        const aiActive = aiRef.current && !manualKeys; // you can always grab the sticks
+
+        let thrusting;
+        let left;
+        let right;
+        if (aiActive) {
+          const c = controlsRef.current;
+          thrusting = !!c.thrust;
+          left = !!c.left;
+          right = !!c.right;
+        } else {
+          thrusting = k.Space || k.ArrowUp || k.KeyW;
+          left = k.ArrowLeft || k.KeyA;
+          right = k.ArrowRight || k.KeyD;
+        }
+
+        // 1) next control decision every 100 ms, 2) re-plan the path now and then
+        if (aiRef.current) {
+          aiClock.current += dt;
+          planClock.current += dt;
+          if (aiActive && aiClock.current >= api.AI_INTERVAL) {
+            aiClock.current = 0;
+            askControl(r, padRef.current);
+          }
+          if (needsPlan.current || planClock.current >= api.PLAN_EVERY) {
+            planClock.current = 0;
+            needsPlan.current = false;
+            askPlan(r, padRef.current);
+          }
+        }
 
         r.throttle = thrusting && r.fuel > 0 ? 1 : 0;
         if (left) r.w -= TORQUE * dt;
@@ -202,8 +363,24 @@ export default function App() {
           r.vy = 0;
 
           attempt.current += 1;
-          const entry = { id: attempt.current, status: r.status, score };
+          const mode = aiRef.current ? "ai" : "manual";
+          const entry = { id: attempt.current, status: r.status, score, mode };
           setLog((old) => [entry, ...old].slice(0, 50));
+          // keep the backend history in sync (best effort — the box may be offline)
+          api
+            .saveFlight({
+              mode,
+              pilot: aiRef.current ? sourceRef.current : null,
+              status: r.status,
+              score,
+              time: r.t,
+              fuel: r.fuel,
+              vx: impact.vx,
+              vy: impact.vy,
+              angle: impact.angle,
+              message: r.msg,
+            })
+            .catch(() => {});
         }
 
         sample += dt;
@@ -316,6 +493,38 @@ export default function App() {
         ctx.moveTo(tr[i - 1].x, tr[i - 1].y);
         ctx.lineTo(tr[i].x, tr[i].y);
         ctx.stroke();
+      }
+
+      /* predicted path from the trained policy (AI pilot) */
+      const planPts = planRef.current;
+      if (aiRef.current && planPts.length > 1) {
+        ctx.save();
+        ctx.setLineDash([10, 8]);
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = "rgba(255,214,102,0.92)";
+        ctx.beginPath();
+        ctx.moveTo(planPts[0].x, planPts[0].y);
+        for (let i = 1; i < planPts.length; i++) ctx.lineTo(planPts[i].x, planPts[i].y);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // breadcrumbs every second of predicted flight
+        ctx.fillStyle = "rgba(255,214,102,0.7)";
+        for (let i = 0; i < planPts.length; i += 10) {
+          ctx.beginPath();
+          ctx.arc(planPts[i].x, planPts[i].y, 2.4, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // predicted touchdown point
+        const end = planPts[planPts.length - 1];
+        ctx.fillStyle = "#ffd666";
+        ctx.beginPath();
+        ctx.moveTo(end.x, end.y - 8);
+        ctx.lineTo(end.x + 8, end.y);
+        ctx.lineTo(end.x, end.y + 8);
+        ctx.lineTo(end.x - 8, end.y);
+        ctx.closePath();
+        ctx.fill();
+        ctx.restore();
       }
 
       /* smoke first, then rocket, then fire on top */
@@ -462,6 +671,18 @@ export default function App() {
   const landings = log.filter((l) => l.status === "LANDED").length;
   const best = attempts ? Math.max(...log.map((l) => l.score)) : "–";
 
+  const pilotLabel = !aiOn
+    ? "Manual flight"
+    : pilotSource === "model"
+      ? "PPO policy"
+      : pilotSource === "heuristic"
+        ? "Guidance law"
+        : pilotSource === "local"
+          ? "Local fallback"
+          : "Standing by";
+  const backendLabel =
+    backend === "online" ? "Connected" : backend === "offline" ? "Offline" : "Checking…";
+
   return (
     <main className="app">
       <header className="topbar">
@@ -583,7 +804,10 @@ export default function App() {
                   {log.slice(0, 5).map((l) => (
                     <div key={l.id} className={`result-row ${l.status.toLowerCase()}`}>
                       <span>#{l.id}</span>
-                      <span>{l.status === "LANDED" ? "Landed" : "Crash"}</span>
+                      <span>
+                        {l.mode === "ai" ? "🤖 " : "🎮 "}
+                        {l.status === "LANDED" ? "Landed" : "Crash"}
+                      </span>
                       <b>{l.score}</b>
                     </div>
                   ))}
@@ -622,8 +846,72 @@ export default function App() {
             </ul>
           </Panel>
 
+          <Panel icon="🧠" title="ML autopilot">
+            <div className="ai-grid">
+              <div><span>Backend</span><strong className={backend === "online" ? "ok" : backend === "offline" ? "bad" : ""}>{backendLabel}</strong></div>
+              <div><span>Policy</span><strong>{model && model.loaded ? "Trained PPO" : "Guidance law"}</strong></div>
+              <div><span>Pilot</span><strong>{pilotLabel}</strong></div>
+              <div>
+                <span>Eval landings</span>
+                <strong>
+                  {model && model.success_rate != null
+                    ? `${Math.round(model.success_rate * 100)}%`
+                    : "–"}
+                </strong>
+              </div>
+            </div>
+
+            {planLabel && <p className="ai-note">{planLabel}</p>}
+
+            {trainingRunning ? (
+              <div className="training">
+                <div className="train-bar">
+                  <i style={{ width: `${Math.min(100, training.percent || 0)}%` }} />
+                </div>
+                <div className="train-meta">
+                  <span>{Number(training.step || 0).toLocaleString()} / {Number(training.total || 0).toLocaleString()} steps</span>
+                  <span>{training.fps || 0} fps</span>
+                  <span>
+                    {training.success_rate != null
+                      ? `${Math.round(training.success_rate * 100)}% landing`
+                      : "learning…"}
+                  </span>
+                </div>
+                <button className="mc-btn stone" onClick={stopTraining}>⏹ Stop training</button>
+              </div>
+            ) : (
+              <div className="training">
+                <label className="train-pick">
+                  <span>Training budget</span>
+                  <select
+                    value={trainTimesteps}
+                    onChange={(e) => setTrainTimesteps(Number(e.target.value))}
+                  >
+                    <option value={150000}>Quick · 150k steps</option>
+                    <option value={500000}>Standard · 500k steps</option>
+                    <option value={2000000}>Thorough · 2M steps</option>
+                  </select>
+                </label>
+                <button className="mc-btn" onClick={startTraining}>🎓 Train model</button>
+                {training && training.eval && (
+                  <p className="ai-note">
+                    Last run: {Math.round(training.eval.success_rate * 100)}% landings over{" "}
+                    {training.eval.episodes} attempts
+                  </p>
+                )}
+                {training && training.error && <p className="ai-note bad">{training.error}</p>}
+              </div>
+            )}
+          </Panel>
+
           <Panel icon="🧰" title="Quick actions">
             <div className="actions">
+              <button
+                className={`mc-btn ai-toggle ${aiOn ? "on" : ""}`}
+                onClick={toggleAI}
+              >
+                {aiOn ? "🤖 AI pilot: ON" : "🤖 AI pilot: OFF"}
+              </button>
               <button className="mc-btn stone" onClick={() => setPaused((v) => !v)}>
                 {paused ? "▶ Resume" : "Ⅱ Pause"}
               </button>

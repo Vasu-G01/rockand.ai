@@ -16,6 +16,8 @@ dist/
 
 # Machine Learning generated models
 *.pkl
+backend/ml/models/*.zip
+backend/ml/models/training_*.json
 
 # IDE settings
 .vscode/

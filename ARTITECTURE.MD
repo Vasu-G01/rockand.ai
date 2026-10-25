@@ -25,75 +25,101 @@ AstroLand-AI/
 ├── frontend/
 │   ├── public/
 │   │   └── assets/
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── RocketCanvas.jsx
-│   │   │   ├── GameDashboard.jsx
-│   │   │   ├── FuelMeter.jsx
-│   │   │   └── VelocityMeter.jsx
-│   │   ├── pages/
-│   │   │   ├── Home.jsx
-│   │   │   ├── Simulation.jsx
-│   │   │   └── History.jsx
-│   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   └── styles.css
+│   └── src/
+│       ├── App.jsx              # canvas simulation + AI pilot integration
+│       ├── api.js               # backend client + local guidance fallback
+│       ├── index.css
+│       ├── App.css
+│       └── main.jsx
 │   └── package.json
 │
 ├── backend/
-│   ├── app.py
-│   ├── config.py
+│   ├── app.py                   # Flask application and API endpoints
+│   ├── config.py                # paths, ports, training defaults
 │   ├── requirements.txt
 │   ├── simulation/
-│   │   ├── physics.py
-│   │   └── landing.py
+│   │   ├── physics.py           # port of the canvas physics (shared rules)
+│   │   └── landing.py           # touchdown evaluation + scoring
 │   ├── ml/
-│   │   ├── train_model.py
-│   │   └── predict.py
-│   └── database/
-│       └── database.py
-│
-├── tests/
-│   ├── test_physics.py
-│   └── test_prediction.py
+│   │   ├── env.py               # Gym environment used for training
+│   │   ├── train_model.py       # PPO training, evaluation, status file
+│   │   ├── predict.py           # Pilot: load policy, act(), plan()
+│   │   └── models/              # ppo_rocket_land.zip, meta + status JSON
+│   ├── database/
+│   │   └── database.py          # SQLite flights table
+│   └── tests/
+│       ├── test_physics.py
+│       └── test_prediction.py
 │
 ├── .gitignore
 ├── README.md
-└── ARCHITECTURE.md
+└── ARTITECTURE.MD
 ```
 
 ## 4. Component Responsibilities
 
 ### Frontend
-- **Home.jsx:** Project landing page.
-- **Simulation.jsx:** Rocket simulation screen.
-- **RocketCanvas.jsx:** Rocket movement and visual animation.
-- **GameDashboard.jsx:** Displays simulation information.
-- **FuelMeter.jsx:** Shows remaining fuel.
-- **VelocityMeter.jsx:** Shows rocket velocity.
-- **History.jsx:** Displays saved simulation history.
+- **App.jsx:** Rocket simulation canvas, manual controls and the AI pilot loop
+  (requests a control every 100 ms, re-plans the path, draws the predicted path).
+- **api.js:** HTTP client for the Flask API plus a local guidance controller used
+  when the backend is unreachable.
+- **index.css:** all styling.
 
 ### Backend
-- **app.py:** Flask application and API endpoints.
-- **config.py:** Application configuration.
-- **physics.py:** Rocket physics calculations.
-- **landing.py:** Landing simulation logic.
-- **train_model.py:** Trains the machine learning model.
-- **predict.py:** Generates ML predictions.
-- **database.py:** Handles SQLite database operations.
+- **app.py:** Flask API — `/api/predict`, `/api/plan`, `/api/train*`, `/api/flights`.
+- **config.py:** model paths, ports and training defaults.
+- **physics.py:** the single source of truth for the rocket dynamics (kept in
+  lockstep with App.jsx) and the shared spawn ranges.
+- **landing.py:** LANDED vs CRASHED evaluation and scoring.
+- **env.py:** Gym environment (`RocketLandEnv`, Discrete(6) actions, 10 features)
+  with a spawn curriculum: 0 = close to the pad, 2 = exact browser randomisation.
+- **train_model.py:** trains PPO, streams progress to `training_status.json`,
+  evaluates the policy and records the metadata.
+- **predict.py:** `Pilot` singleton — loads the trained policy, answers single
+  control decisions (`act`) and full predicted flights (`plan`), with a
+  classical guidance controller as fallback.
+- **database.py:** SQLite storage for finished flights.
 
 ### Tests
-- **test_physics.py:** Tests physics calculations.
-- **test_prediction.py:** Tests ML prediction functionality.
+- **test_physics.py:** dynamics, limits, spawn ranges and scoring.
+- **test_prediction.py:** features, guidance law, environment and pilot output.
 
 ## 5. System Workflow
 
-1. The user interacts with the React frontend.
-2. The frontend renders the rocket simulation using HTML Canvas.
-3. The frontend communicates with the Flask backend through API requests.
-4. The backend performs simulation calculations and requests ML predictions when needed.
-5. The database stores relevant simulation results.
-6. The frontend displays the updated simulation state to the user.
+### Manual flight
+1. The user interacts with the React frontend and the canvas renders the rocket.
+2. On landing or crash the result is stored locally and posted to `/api/flights`.
+
+### AI pilot (trained model)
+1. The user presses **🤖 AI pilot: ON** (manual keys still override at any time).
+2. The frontend posts the telemetry to `/api/plan`; the backend rolls the trained
+   policy forward and returns the predicted path, which is drawn as a dashed line.
+3. Every 100 ms the frontend posts the telemetry to `/api/predict` and applies the
+   returned control (thrust / rotate left / rotate right) — one decision at a time.
+4. The path is re-planned every few seconds, so the pilot corrects any drift.
+5. Results are saved to SQLite; training progress and model info are shown in the
+   "ML autopilot" panel.
+
+### Training
+1. `ml/train_model.py` builds 4 parallel environments and trains PPO.
+2. Progress is written to `ml/models/training_status.json`, which the API exposes
+   through `/api/train/status`.
+3. On completion the policy (`ppo_rocket_land.zip`) is evaluated and the API
+   hot-reloads it, so the next flight uses the new model.
+
+### API
+
+| Method | Route | Purpose |
+|---|---|---|
+| GET | `/api/health` | model + training + database overview |
+| GET | `/api/model` | loaded policy info |
+| POST | `/api/model/reload` | re-read the model file |
+| POST | `/api/predict` | one control decision for a telemetry state |
+| POST | `/api/plan` | predicted flight path + control sequence |
+| POST | `/api/train` | start training (background process) |
+| GET | `/api/train/status` | live training progress |
+| POST | `/api/train/stop` | graceful stop |
+| GET/POST | `/api/flights` | flight history |
 
 ## 6. Team Development Guidelines
 

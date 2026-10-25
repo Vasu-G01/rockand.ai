@@ -1,0 +1,10 @@
+flask
+flask-cors
+numpy
+pandas
+scikit-learn
+gymnasium
+stable-baselines3
+# Install torch CPU-only first to avoid the multi-GB CUDA wheels:
+#   uv pip install torch --index https://download.pytorch.org/whl/cpu
+torch
