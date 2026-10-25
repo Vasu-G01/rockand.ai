@@ -954,7 +954,7 @@ function HudRow({ icon, label, value }) {
 const W = 1080, H = 560;
 const GRAVITY = 9.8*5;          // px/s^2 downward
 const DRY_MASS = 1000;       // rocket body mass
-const FUEL_START = 300;      // fuel mass (also burns off -> rocket gets lighter)
+const FUEL_START = 300;      // fuel mass (also burns off, rocket gets lighter)
 const MAX_THRUST = 125000;    // force at 100% throttle
 const BURN_RATE = 20;        // fuel per second at 100% throttle
 const TORQUE = 2.6;          // rad/s^2 from side thrusters
