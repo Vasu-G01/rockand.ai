@@ -8,11 +8,11 @@ A PPO reinforcement-learning agent is **trained on the exact physics the browser
 
 ## Team Credits
 
-Vasu Gumber : Rocket Controls and ML Implementation
+**Vasu Gumber** : Rocket Controls and ML Implementation
 
-Nirjala Sharma : Backend and ML Implementation
+**Nirjala Sharma** : Backend and ML Implementation
 
-Gauri Goyal : Graphical Visualization and UI Design
+**Gauri Goyal** : Graphical Visualization and UI Design
 
 ## Features
 
