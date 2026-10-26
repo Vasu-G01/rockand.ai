@@ -1,0 +1,18 @@
+{
+  "running": true,
+  "stopping": false,
+  "message": "Training",
+  "step": 137540,
+  "total": 2000000,
+  "percent": 6.9,
+  "elapsed": 744.0,
+  "eta": 10075.1,
+  "fps": 185,
+  "episodes": 977,
+  "success_rate": 0.48,
+  "return_mean": -53.73285239649107,
+  "curriculum": 1,
+  "pid": 5376,
+  "seed": 7,
+  "updated_at": "2026-10-26T08:48:21+00:00"
+}
