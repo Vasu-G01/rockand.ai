@@ -6,6 +6,14 @@ AstroLand AI is a rocket landing simulation project that combines interactive vi
 
 A PPO reinforcement-learning agent is **trained on the exact physics the browser flies**, then lands the rocket by itself: it predicts a best path, draws it on screen and applies the controls one decision at a time.
 
+## Team Credits
+
+Vasu Gumber : Rocket Controls and ML Implementation
+
+Nirjala Sharma : Backend and ML Implementation
+
+Gauri Goyal : Graphical Visualization and UI Design
+
 ## Features
 
 - Interactive rocket landing simulation
@@ -47,7 +55,7 @@ A PPO reinforcement-learning agent is **trained on the exact physics the browser
 ## Project Structure
 
 ```text
-AstroLand-AI/
+Rockand.Ai/
 ├── frontend/
 │   └── src/
 │       ├── App.jsx          # canvas simulation + AI pilot integration
@@ -179,7 +187,7 @@ Contributions are welcome! Follow these steps to contribute to AstroLand AI.
 3. Navigate to the project directory:
 
    ```bash
-   cd AstroLand-AI
+   cd rockand.ai
    ```
 
 4. Create a new branch:
@@ -211,4 +219,3 @@ Contributions are welcome! Follow these steps to contribute to AstroLand AI.
 - Do not commit virtual environments, `node_modules`, secrets, or generated files.
 - Keep your code clean and well-organized.
 - Discuss major changes with the project maintainers before implementing them.
--
