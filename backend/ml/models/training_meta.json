@@ -1,0 +1,23 @@
+{
+  "model_path": "C:\\Users\\vasug\\Desktop\\rocket-land-sim\\Rocket-Landing\\backend\\ml\\models\\ppo_rocket_land.zip",
+  "timesteps": 507872,
+  "timesteps_target": 500000,
+  "seed": 7,
+  "trained_at": "2026-10-25T18:13:33+00:00",
+  "wall_seconds": 608.0,
+  "stopped_early": false,
+  "error": null,
+  "eval": {
+    "episodes": 40,
+    "landings": 40,
+    "success_rate": 1.0,
+    "return_mean": 150.53,
+    "sample_landing": {
+      "ok": true,
+      "score": 365,
+      "message": "Landing successful!",
+      "on_pad": true,
+      "soft": true
+    }
+  }
+}
