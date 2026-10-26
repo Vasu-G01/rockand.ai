@@ -11,6 +11,9 @@ A PPO reinforcement-learning agent is **trained on the exact physics the browser
 - Interactive rocket landing simulation
 - Real-time visualization of rocket movement
 - Monitoring of fuel and velocity
+- **Randomised mission every game:** launch point, sideways drift and the landing pad are re-rolled inside the screen bounds
+- **Live speed & angular-velocity graphs** updated with the telemetry
+- **Real-time landing read-outs:** each value turns green inside the limits and red the moment it leaves them
 - Physics-based landing calculations
 - **Autopilot (🤖 AI pilot): trained PPO policy lands the rocket on its own**
 - **Predicted flight path overlay — watch the plan before it happens**

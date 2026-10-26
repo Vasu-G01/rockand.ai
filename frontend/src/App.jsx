@@ -19,47 +19,70 @@ const LIMIT_VX = 25;
 const LIMIT_RAD = 0.21; // ~12 degrees
 const LIMIT_DEG = (LIMIT_RAD * 180) / Math.PI;
 
-const newRocket = () => ({
-  x: 540, y: 100, vx: 0, vy: 0, a: 0, w: 0,
-  fuel: FUEL_START, throttle: 0, t: 0,
-  status: "FLYING", msg: "Mission in progress",
+const rand = (min, max) => min + Math.random() * (max - min);
+
+// Both the rocket and the landing pad spawn at random positions inside the
+// screen bounds on every new game (mirror PAD_X_MIN/MAX + random_start in
+// backend/simulation/physics.py so the trained policy sees the same world).
+const PAD_X_MIN = PAD_HALF + 50;
+const PAD_X_MAX = W - PAD_HALF - 50;
+const randomPadX = () => rand(PAD_X_MIN, PAD_X_MAX);
+
+// The rocket launches from the upper middle of the screen with a random
+// sideways drift, so no two runs start the same way.
+const randomStart = () => ({
+  x: rand(W * 0.32, W * 0.68),
+  y: rand(70, 300),
+  vx: (Math.random() < 0.5 ? -1 : 1) * rand(25, 55),
 });
 
+const newRocket = () => {
+  const s = randomStart();
+  return {
+    x: s.x, y: s.y, vx: s.vx, vy: 0, a: 0, w: 0,
+    fuel: FUEL_START, throttle: 0, t: 0,
+    status: "FLYING", msg: "Mission in progress",
+  };
+};
+
+const CONTROL_KEYS = ["ArrowUp", "ArrowLeft", "ArrowRight", "Space", "KeyW", "KeyA", "KeyD"];
+
 const initialTelemetry = {
-  x: 540, vx: 0, vy: 0, angle: 0, fuel: FUEL_START, alt: 0,
+  x: W / 2, vx: 0, vy: 0, angle: 0, w: 0, speed: 0,
+  fuel: FUEL_START, alt: 0,
   status: "FLYING", throttle: 0, time: 0, msg: "",
 };
 
-const NAV = [
-  { icon: "🏠", label: "Home" },
-  { icon: "🚀", label: "Simulator" },
-  { icon: "📊", label: "Results" },
-  { icon: "⚙️", label: "Settings" },
-  { icon: "ℹ️", label: "About" },
-];
+/** Samples kept for the live speed / angular-velocity graphs (~8 s at 20 Hz). */
+const MOTION_SAMPLES = 160;
+
+/** Star field behind the rocket — generated once, outside render. */
+const STARS = Array.from({ length: 140 }, () => ({
+  x: Math.random() * W,
+  y: Math.random() * (H - 200),
+  s: Math.random() * 1.6 + 0.5,
+  p: Math.random() * 6.28,
+}));
 
 export default function App() {
   const canvasRef = useRef(null);
   const keys = useRef({});
   const rocket = useRef(newRocket());
+  // Landing pad for this game: the state feeds the UI, the ref feeds the
+  // render loop (which must not depend on React state).
+  const [padX, setPadX] = useState(() => randomPadX());
+  const padRef = useRef(padX);
   const particles = useRef([]);
   const trail = useRef([]);
   const attempt = useRef(0);
   const pausedRef = useRef(false);
-  const stars = useRef(
-    Array.from({ length: 140 }, () => ({
-      x: Math.random() * W,
-      y: Math.random() * (H - 200),
-      s: Math.random() * 1.6 + 0.5,
-      p: Math.random() * 6.28,
-    }))
-  );
+  const stars = useRef(STARS);
 
   const [telemetry, setTelemetry] = useState(initialTelemetry);
   const [history, setHistory] = useState([]);
+  const [motion, setMotion] = useState([]); // {sp, w} samples for the graphs
   const [log, setLog] = useState([]);
   const [paused, setPaused] = useState(false);
-  const [nav, setNav] = useState("Simulator");
 
   useEffect(() => {
     pausedRef.current = paused;
@@ -189,7 +212,11 @@ export default function App() {
   };
 
   const reset = () => {
-    rocket.current = newRocket();
+    const fresh = newRocket();
+    rocket.current = fresh;
+    const nextPad = randomPadX(); // new game = new landing spot
+    padRef.current = nextPad;
+    setPadX(nextPad);
     particles.current = [];
     trail.current = [];
     controlsRef.current = { thrust: false, left: false, right: false };
@@ -199,8 +226,16 @@ export default function App() {
     planClock.current = 0;
     needsPlan.current = aiRef.current;
     setHistory([]);
+    setMotion([]);
     setPaused(false);
-    setTelemetry(initialTelemetry);
+    // show the freshly spawned rocket, not the neutral placeholder values
+    setTelemetry({
+      ...initialTelemetry,
+      x: fresh.x,
+      vx: fresh.vx,
+      speed: Math.abs(fresh.vx),
+      alt: Math.max(0, GROUND_Y - fresh.y),
+    });
   };
 
   useEffect(() => {
@@ -252,6 +287,7 @@ export default function App() {
       }
       const ctx = canvas.getContext("2d");
       const r = rocket.current;
+      const landingPadX = padRef.current; // where the pad sits for this game
       const dt = Math.min((now - last) / 1000, 0.04);
       last = now;
       const isPaused = pausedRef.current;
@@ -344,13 +380,14 @@ export default function App() {
 
         if (r.y >= GROUND_Y) {
           r.y = GROUND_Y;
-          const onPad = Math.abs(r.x - W / 2) <= PAD_HALF;
+          const onPad = Math.abs(r.x - landingPadX) <= PAD_HALF;
           const soft =
             Math.abs(r.vy) <= LIMIT_VY && Math.abs(r.vx) <= LIMIT_VX && Math.abs(r.a) <= LIMIT_RAD;
           const ok = soft && onPad;
           const score = ok
             ? Math.round(200 + r.fuel - Math.abs(r.vy) * 2)
             : -Math.round(Math.abs(r.vy) + Math.abs(r.vx) * 2 + Math.abs(r.a) * 50);
+          const impact = { vx: r.vx, vy: r.vy, angle: r.a };
 
           r.status = ok ? "LANDED" : "CRASHED";
           r.msg = ok
@@ -461,25 +498,25 @@ export default function App() {
       beam.addColorStop(0, "rgba(70,230,177,0)");
       beam.addColorStop(1, "rgba(70,230,177,0.14)");
       ctx.fillStyle = beam;
-      ctx.fillRect(W / 2 - PAD_HALF, H - 330, PAD_HALF * 2, 260);
+      ctx.fillRect(landingPadX - PAD_HALF, H - 330, PAD_HALF * 2, 260);
 
       ctx.save();
       ctx.shadowColor = "#46e6b1";
       ctx.shadowBlur = 24;
       ctx.fillStyle = "#46e6b1";
-      ctx.fillRect(W / 2 - PAD_HALF, H - 70, PAD_HALF * 2, 6);
+      ctx.fillRect(landingPadX - PAD_HALF, H - 70, PAD_HALF * 2, 6);
       ctx.restore();
       const pulse = 0.5 + 0.5 * Math.sin(clock * 4);
       [-PAD_HALF, PAD_HALF].forEach((dx) => {
         ctx.fillStyle = `rgba(255,214,102,${0.5 + pulse * 0.5})`;
         ctx.beginPath();
-        ctx.arc(W / 2 + dx, H - 74, 4, 0, Math.PI * 2);
+        ctx.arc(landingPadX + dx, H - 74, 4, 0, Math.PI * 2);
         ctx.fill();
       });
       ctx.fillStyle = "rgba(200,225,235,0.75)";
       ctx.font = "12px 'Share Tech Mono', monospace";
       ctx.textAlign = "center";
-      ctx.fillText("LANDING ZONE", W / 2, H - 82);
+      ctx.fillText("LANDING ZONE", landingPadX, H - 82);
       ctx.textAlign = "start";
 
       /* trail */
@@ -629,11 +666,14 @@ export default function App() {
       if (tele > 0.05 || r.status !== lastStatus) {
         tele = 0;
         lastStatus = r.status;
+        const speed = Math.hypot(r.vx, r.vy);
         setTelemetry({
           x: r.x,
           vx: r.vx,
           vy: r.vy,
           angle: (r.a * 180) / Math.PI,
+          w: r.w,
+          speed,
           fuel: r.fuel,
           alt: Math.max(0, GROUND_Y - r.y),
           status: r.status,
@@ -641,6 +681,10 @@ export default function App() {
           time: r.t,
           msg: r.msg,
         });
+        if (r.status === "FLYING") {
+          const sample = { sp: speed, w: r.w };
+          setMotion((old) => (old.length >= MOTION_SAMPLES ? [...old.slice(1), sample] : [...old, sample]));
+        }
       }
 
       frame = requestAnimationFrame(loop);
@@ -656,16 +700,27 @@ export default function App() {
 
   const t = telemetry;
   const fuelPercent = Math.max(0, (t.fuel / FUEL_START) * 100);
-  const fuelTone = fuelPercent < 10 ? "danger" : fuelPercent < 25 ? "warn" : "";
   const mm = String(Math.floor(t.time / 60)).padStart(2, "0");
   const ss = String(Math.floor(t.time % 60)).padStart(2, "0");
 
+  // live landing read-outs: green while the value is inside the limits,
+  // red the moment it drifts out — updated with every telemetry tick.
+  const okVy = Math.abs(t.vy) <= LIMIT_VY;
+  const okVx = Math.abs(t.vx) <= LIMIT_VX;
+  const okAngle = Math.abs(t.angle) <= LIMIT_DEG;
+  const dx = Math.round(t.x - padX);
+  const okPad = Math.abs(dx) <= PAD_HALF;
+
   const conditions = [
-    { label: "Vertical speed", limit: `≤ ${LIMIT_VY} m/s`, ok: Math.abs(t.vy) <= LIMIT_VY },
-    { label: "Horizontal speed", limit: `≤ ${LIMIT_VX} m/s`, ok: Math.abs(t.vx) <= LIMIT_VX },
-    { label: "Angle", limit: `≤ ${Math.round(LIMIT_DEG)}°`, ok: Math.abs(t.angle) <= LIMIT_DEG },
-    { label: "Over the pad", limit: `± ${PAD_HALF} px`, ok: Math.abs(t.x - W / 2) <= PAD_HALF },
+    { label: "Vertical speed", limit: `≤ ${LIMIT_VY} m/s`, value: `${t.vy.toFixed(1)} m/s`, ok: okVy },
+    { label: "Horizontal speed", limit: `≤ ${LIMIT_VX} m/s`, value: `${t.vx.toFixed(1)} m/s`, ok: okVx },
+    { label: "Angle", limit: `≤ ${Math.round(LIMIT_DEG)}°`, value: `${t.angle.toFixed(1)}°`, ok: okAngle },
+    { label: "Over the pad", limit: `± ${PAD_HALF} px`, value: `${dx > 0 ? "+" : ""}${dx} px`, ok: okPad },
   ];
+
+  // scales for the live speed / angular-velocity graphs
+  const speedMax = Math.max(60, Math.ceil(motion.reduce((m, s) => Math.max(m, s.sp), 0) / 10) * 10);
+  const wMax = Math.max(1, Math.ceil(motion.reduce((m, s) => Math.max(m, Math.abs(s.w)), 0) * 10) / 10);
 
   const attempts = log.length;
   const landings = log.filter((l) => l.status === "LANDED").length;
@@ -704,23 +759,6 @@ export default function App() {
       </header>
 
       <div className="shell">
-        <nav className="sidebar" aria-label="Main">
-          {NAV.map((n) => (
-            <button
-              key={n.label}
-              className={`nav-btn ${nav === n.label ? "active" : ""}`}
-              onClick={() => setNav(n.label)}
-            >
-              <span className="nav-icon">{n.icon}</span>
-              {n.label}
-            </button>
-          ))}
-          <div className="side-card">
-            <div className="grass-block big" aria-hidden="true" />
-            <p>Fly<br />Burn<br />Land</p>
-          </div>
-        </nav>
-
         <section className="center">
           <div className="panel stage-panel">
             <div className="stage">
@@ -728,25 +766,19 @@ export default function App() {
 
               <div className="hud hud-left">
                 <HudRow icon="🚀" label="Altitude" value={`${t.alt.toFixed(0)} m`} />
-                <HudRow icon="⬇️" label="Vertical speed" value={`${t.vy.toFixed(1)} m/s`} />
-                <HudRow icon="↔️" label="Horizontal speed" value={`${t.vx.toFixed(1)} m/s`} />
+                <HudRow icon="⬇️" label="Vertical speed" value={`${t.vy.toFixed(1)} m/s`} tone={okVy ? "ok" : "bad"} />
+                <HudRow icon="↔️" label="Horizontal speed" value={`${t.vx.toFixed(1)} m/s`} tone={okVx ? "ok" : "bad"} />
                 <HudRow icon="⛽" label="Fuel" value={`${fuelPercent.toFixed(0)}%`} />
               </div>
 
               <div className="hud hud-right">
                 <HudRow icon="⏱️" label="Time" value={`${mm}:${ss}`} />
+                <HudRow icon="📐" label="Angle" value={`${t.angle.toFixed(1)}°`} tone={okAngle ? "ok" : "bad"} />
                 <HudRow
                   icon={<i className={`dot ${t.status.toLowerCase()}`} />}
                   label="Status"
                   value={t.status === "FLYING" ? "In flight" : t.status === "LANDED" ? "Landed" : "Crashed"}
                 />
-              </div>
-
-              <div className="keybar">
-                <span><b className="key sm">W</b> Thrust</span>
-                <span><b className="key sm">A</b><b className="key sm">D</b> Rotate</span>
-                <span><b className="key sm">P</b> Pause</span>
-                <span><b className="key sm">R</b> Restart</span>
               </div>
 
               {t.status !== "FLYING" && (
@@ -777,41 +809,60 @@ export default function App() {
                   </strong>
                 </div>
               </div>
+              <div className="last5">
+                <h4>Last 5 results</h4>
+                {log.length === 0 && <p className="empty">No landings yet. Take off!</p>}
+                {log.slice(0, 5).map((l) => (
+                  <div key={l.id} className={`result-row ${l.status.toLowerCase()}`}>
+                    <span>#{l.id}</span>
+                    <span>
+                      {l.mode === "ai" ? "🤖 " : "🎮 "}
+                      {l.status === "LANDED" ? "Landed" : "Crash"}
+                    </span>
+                    <b>{l.score}</b>
+                  </div>
+                ))}
+              </div>
             </Panel>
 
             <Panel icon="📈" title="Trajectory monitor">
-              <div className="traj">
-                <svg viewBox="0 0 320 190" role="img" aria-label="Live rocket trajectory">
-                  {[30, 65, 100, 135, 170].map((y) => (
-                    <line key={y} x1="12" y1={y} x2="308" y2={y} className="chart-grid" />
-                  ))}
-                  {[40, 100, 160, 220, 280].map((x) => (
-                    <line key={x} x1={x} y1="15" x2={x} y2="175" className="chart-grid" />
-                  ))}
-                  {history.length > 1 && (
-                    <polyline
-                      points={history
-                        .map((p) => `${12 + (p.x / W) * 296},${15 + (p.y / H) * 155}`)
-                        .join(" ")}
-                      className="trajectory-line"
-                    />
-                  )}
-                  <circle cx={12 + (540 / W) * 296} cy={15 + ((H - 65) / H) * 155} r="5" className="target-dot" />
-                </svg>
-                <div className="last5">
-                  <h4>Last 5 results</h4>
-                  {log.length === 0 && <p className="empty">No landings yet. Take off!</p>}
-                  {log.slice(0, 5).map((l) => (
-                    <div key={l.id} className={`result-row ${l.status.toLowerCase()}`}>
-                      <span>#{l.id}</span>
-                      <span>
-                        {l.mode === "ai" ? "🤖 " : "🎮 "}
-                        {l.status === "LANDED" ? "Landed" : "Crash"}
-                      </span>
-                      <b>{l.score}</b>
-                    </div>
-                  ))}
+              <svg className="traj-svg" viewBox="0 0 320 190" role="img" aria-label="Live rocket trajectory">
+                {[30, 65, 100, 135, 170].map((y) => (
+                  <line key={y} x1="12" y1={y} x2="308" y2={y} className="chart-grid" />
+                ))}
+                {[40, 100, 160, 220, 280].map((x) => (
+                  <line key={x} x1={x} y1="15" x2={x} y2="175" className="chart-grid" />
+                ))}
+                {history.length > 1 && (
+                  <polyline
+                    points={history
+                      .map((p) => `${12 + (p.x / W) * 296},${15 + (p.y / H) * 155}`)
+                      .join(" ")}
+                    className="trajectory-line"
+                  />
+                )}
+                <circle
+                  cx={12 + (padX / W) * 296}
+                  cy={15 + (GROUND_Y / H) * 155}
+                  r="5"
+                  className="target-dot"
+                />
+              </svg>
+            </Panel>
+
+            <Panel icon="📊" title="Speed & angular velocity">
+              <div className="charts">
+                <div className="chart-head">
+                  <span><i className="swatch speed" />Speed</span>
+                  <strong>{t.speed.toFixed(1)} m/s</strong>
                 </div>
+                <LineChart points={motion.map((s) => s.sp)} color="#5eeaff" min={0} max={speedMax} />
+
+                <div className="chart-head">
+                  <span><i className="swatch spin" />Angular velocity</span>
+                  <strong>{t.w.toFixed(2)} rad/s</strong>
+                </div>
+                <LineChart points={motion.map((s) => s.w)} color="#ffd666" min={-wMax} max={wMax} zero />
               </div>
             </Panel>
           </div>
@@ -825,13 +876,6 @@ export default function App() {
               <li><b className="key">D</b> Rotate right <em>(→)</em></li>
               <li><b className="key">R</b> Restart mission</li>
             </ul>
-            <div className="fuel">
-              <div className="fuel-top">
-                <span>⛽ Fuel</span>
-                <strong>{t.fuel.toFixed(0)} / {FUEL_START}</strong>
-              </div>
-              <div className="bar"><div className={`fill ${fuelTone}`} style={{ width: `${fuelPercent}%` }} /></div>
-            </div>
           </Panel>
 
           <Panel icon="🎯" title="Landing conditions">
@@ -839,8 +883,11 @@ export default function App() {
               {conditions.map((c) => (
                 <li key={c.label} className={c.ok ? "ok" : "bad"}>
                   <span className="mark">{c.ok ? "✔" : "✖"}</span>
-                  <span>{c.label}</span>
-                  <em>{c.limit}</em>
+                  <span className="cond-label">
+                    {c.label}
+                    <em>{c.limit}</em>
+                  </span>
+                  <b className={`cond-value ${c.ok ? "ok" : "bad"}`}>{c.value}</b>
                 </li>
               ))}
             </ul>
@@ -861,6 +908,9 @@ export default function App() {
               </div>
             </div>
 
+            {aiOn && manualHeld && (
+              <p className="ai-note warn">Manual override — you have the controls</p>
+            )}
             {planLabel && <p className="ai-note">{planLabel}</p>}
 
             {trainingRunning ? (
@@ -942,356 +992,60 @@ function Panel({ icon, title, children }) {
   );
 }
 
-function HudRow({ icon, label, value }) {
+function HudRow({ icon, label, value, tone }) {
   return (
     <div className="hud-row">
       <span className="hud-icon">{icon}</span>
       <div>
         <small>{label}</small>
-        <strong>{value}</strong>
-
-// ---------- Tunable physics parameters (px, seconds, kg-ish units) ----------
-const W = 1080, H = 560;
-const GRAVITY = 9.8*5;          // px/s^2 downward
-const DRY_MASS = 1000;       // rocket body mass
-const FUEL_START = 300;      // fuel mass (also burns off, rocket gets lighter)
-const MAX_THRUST = 125000;    // force at 100% throttle
-const BURN_RATE = 20;        // fuel per second at 100% throttle
-const TORQUE = 2.6;          // rad/s^2 from side thrusters
-const RCS_BURN = 1.5;        // fuel per second while rotating
-const ANG_DAMP = 0.35;       // tiny rotational damping
-
-// Landing limits
-const MAX_VY = 45, MAX_VX = 25, MAX_ANGLE = 0.21; // ~12 degrees
-
-// ---------- Terrain ----------
-function makeTerrain() {
-  const N = 48;
-  seg = W / N;
-  const pts = [];
-  let y = H - 110;
-  for (let i = 0; i <= N; i++) {
-    y += (Math.random() - 0.5) * 38;
-    y = Math.min(H - 50, Math.max(H - 170, y));
-    pts.push({ x: i * seg, y });
-  }
-  const start = 8 + Math.floor(Math.random() * (N - 20));
-  const padY = pts[start].y;
-  for (let i = start; i <= start + 4; i++) pts[i].y = padY;
-  return { pts, seg, pad: { x1: pts[start].x, x2: pts[start + 4].x, y: padY } };
-}
-
-const W = 1080;
-const H = 560;
-const GRAVITY = 60;
-const DRY_MASS = 1000;
-const FUEL_START = 300;
-const MAX_THRUST = 125000;
-const BURN_RATE = 20;
-const TORQUE = 2.6;
-
-const GROUND_Y = H - 80;
-const PAD_HALF = 65; // landing pad is 130px wide
-const LIMIT_VY = 45;
-const LIMIT_VX = 25;
-const LIMIT_RAD = 0.21; // ~12 degrees
-const LIMIT_DEG = (LIMIT_RAD * 180) / Math.PI;
-
-const rand = (min, max) => min + Math.random() * (max - min);
-
-// Both the rocket and the landing pad are spawned at random
-// positions inside the screen bounds on every new game.
-const randomPadX = () => rand(PAD_HALF + 50, W - PAD_HALF - 50);
-// The rocket keeps clear of the HUD overlays so it is always visible,
-// and is launched with a random sideways drift.
-const randomStart = () => ({
-  x: rand(W * 0.32, W * 0.68),
-  y: rand(70, 300),
-  vx: (Math.random() < 0.5 ? -1 : 1) * rand(25, 55),
-});
-
-const newRocket = () => {
-  const s = randomStart();
-  return {
-    x: s.x, y: s.y, vx: s.vx, vy: 0, a: 0, w: 0,
-    fuel: FUEL_START, throttle: 0, t: 0,
-    status: "FLYING", msg: "Mission in progress",
-  };
-};
-
-const initialTelemetry = {
-  x: W / 2, vx: 0, vy: 0, angle: 0, w: 0, speed: 0, fuel: FUEL_START, alt: 0,
-  status: "FLYING", throttle: 0, time: 0, msg: "",
-};
-
-export default function App() {
-  const canvasRef = useRef(null);
-  const game = useRef(newGame());
-  const keys = useRef(new Set());
-  const [hud, setHud] = useState({});
-  
-   const [aiMode, setAiMode] = useState(false);
-  const aiModeRef = useRef(false);
-  const aiActionRef = useRef(0);
-  async function getAIAction() {
-  const g = game.current;
-  const r = g.r;
-  const pad = g.terrain.pad;
-
-  if (r.status !== "flying") return;
-
-  const observation = [
-    (r.x - (pad.x1 + pad.x2) / 2) / (W / 2),
-    (pad.y - r.y) / (H / 2),
-    r.vx / 100,
-    r.vy / 100,
-    r.a,
-    r.w,
-    0,
-    0,
-  ];
-
-  try {
-    const response = await fetch(
-      "http://127.0.0.1:5000/api/predict",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ observation }),
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error(`HTTP error: ${response.status}`);
-    }
-
-    const data = await response.json();
-    aiActionRef.current = data.action;
-  } catch (error) {
-    console.error("AI prediction failed:", error);
-  }
-}
-  useEffect(() => {
-    pausedRef.current = paused;
-  }, [paused]);
-
-  const reset = () => {
-    const pad = randomPadX();
-    setPadX(pad);
-    padRef.current = pad;
-
-    rocket.current = newRocket();
-    particles.current = [];
-    trail.current = [];
-    setHistory([]);
-    setMotion([]);
-    setPaused(false);
-    setTelemetry({
-      ...initialTelemetry,
-      x: rocket.current.x,
-      vx: rocket.current.vx,
-    });
-  };
-
-  useEffect(() => {
-    const down = (e) => {
-      keys.current[e.code] = true;
-      if (["ArrowUp", "ArrowLeft", "ArrowRight", "Space"].includes(e.code)) e.preventDefault();
-      if (e.code === "KeyR") reset();
-      if (e.code === "KeyP") setPaused((v) => !v);
-    };
-    const up = (e) => {
-      keys.current[e.code] = false;
-    };
-    window.addEventListener("keydown", down);
-    window.addEventListener("keyup", up);
-
-    let frame;
-    let last = performance.now();
-    let clock = 0, sample = 0, tele = 0, trailT = 0;
-    let lastStatus = "FLYING";
-
-    const spawn = (p) => particles.current.push(p);
-
-    const explode = (x, y) => {
-      for (let i = 0; i < 70; i++) {
-        const ang = Math.random() * Math.PI * 2;
-        const sp = 40 + Math.random() * 260;
-        spawn({
-          kind: "fire", x, y,
-          vx: Math.cos(ang) * sp, vy: Math.sin(ang) * sp - 60,
-          life: 0.6 + Math.random() * 0.8, max: 1.4, size: 3 + Math.random() * 6,
-        });
-      }
-      for (let i = 0; i < 30; i++) {
-        spawn({
-          kind: "smoke", x: x + (Math.random() - 0.5) * 30, y,
-          vx: (Math.random() - 0.5) * 60, vy: -20 - Math.random() * 60,
-          life: 1.5 + Math.random(), max: 2.5, size: 8 + Math.random() * 10,
-        });
-      }
-    };
-
-    let last = performance.now(), raf, hudTimer = 0;
-    let aiTimer = setInterval(() => {
-  if (aiModeRef.current && game.current.r.status === "flying") {
-    getAIAction();
-  }
-}, 150);
-    const loop = (now) => {
-      const canvas = canvasRef.current;
-      if (!canvas) {
-        frame = requestAnimationFrame(loop);
-        return;
-      }
-      const ctx = canvas.getContext("2d");
-      const r = rocket.current;
-      // clamp dt: a throttled/background tab can hand out stale frame
-      // timestamps, which would otherwise produce a negative dt.
-      const dt = Math.min(Math.max((now - last) / 1000, 0), 0.04);
-      last = now;
-      step(game.current, keys.current, dt);
-      if (aiModeRef.current) {
-  keys.current.clear();
-
-  switch (aiActionRef.current) {
-    case 1:
-      keys.current.add("ArrowLeft");
-      break;
-    case 2:
-      keys.current.add("ArrowUp");
-      break;
-    case 3:
-      keys.current.add("ArrowRight");
-      break;
-    default:
-      break;
-  }
-}
-
-step(game.current, keys.current, dt);
-      draw(ctx, game.current);
-      hudTimer += dt;
-      if (hudTimer > 0.08) {
-        hudTimer = 0;
-        const r = game.current.r;
-        setHud({
-          vx: r.vx, vy: r.vy, angle: (r.a * 180) / Math.PI, fuel: r.fuel,
-          mass: DRY_MASS + r.fuel, status: r.status,
-          alt: game.current.terrain.pad.y - r.y,
-        });
-      }
-
-      frame = requestAnimationFrame(loop);
-    };
-
-    frame = requestAnimationFrame(loop);
-    return () => {
-      cancelAnimationFrame(raf);
-
-      window.removeEventListener("keydown", onDown);
-      window.removeEventListener("keyup", onUp);
-    };
-  }, []);
-
-  const t = telemetry;
-  const fuelPercent = Math.max(0, (t.fuel / FUEL_START) * 100);
-  const mm = String(Math.floor(t.time / 60)).padStart(2, "0");
-  const ss = String(Math.floor(t.time % 60)).padStart(2, "0");
-
-  // Live landing values: green while inside the limits, red as soon as they break one.
-  const conditions = [
-    {
-      label: "Vertical speed",
-      now: Math.abs(t.vy).toFixed(1),
-      limit: `≤ ${LIMIT_VY} m/s`,
-      ok: Math.abs(t.vy) <= LIMIT_VY,
-    },
-    {
-      label: "Horizontal speed",
-      now: Math.abs(t.vx).toFixed(1),
-      limit: `≤ ${LIMIT_VX} m/s`,
-      ok: Math.abs(t.vx) <= LIMIT_VX,
-    },
-    {
-      label: "Angle",
-      now: Math.abs(t.angle).toFixed(1),
-      limit: `≤ ${LIMIT_DEG.toFixed(0)}°`,
-      ok: Math.abs(t.angle) <= LIMIT_DEG,
-    },
-    {
-      label: "Over the pad",
-      now: String(Math.round(Math.abs(t.x - padX))),
-      limit: `± ${PAD_HALF} px`,
-      ok: Math.abs(t.x - padX) <= PAD_HALF,
-    },
-  ];
-
-  const attempts = log.length;
-  const landings = log.filter((l) => l.status === "LANDED").length;
-  const best = attempts ? Math.max(...log.map((l) => l.score)) : "–";
-
-  return (
-    <div style={{ display: "flex", gap: 16, flexWrap: "wrap", padding: 16, background: "#070b16", minHeight: "70vh", color: "#e8edf7", fontFamily: "system-ui, sans-serif" }}>
-        <button
-  onClick={() => {
-    const nextMode = !aiMode;
-    setAiMode(nextMode);
-    aiModeRef.current = nextMode;
-    aiActionRef.current = 0;
-    keys.current.clear();
-
-    if (nextMode) getAIAction();
-  }}
-  style={{
-    padding: "10px 18px",
-    borderRadius: 8,
-    border: "1px solid #3a527c",
-    background: aiMode ? "#14532d" : "#0f1730",
-    color: "#e8edf7",
-    cursor: "pointer",
-  }}
->
-  {aiMode ? "🤖 AI Mode ON" : "🎮 Manual Mode"}
-</button>
-
-<canvas
-  ref={canvasRef}
-  width={W}
-  height={H}
-  style={{
-    width: "100%",
-    maxWidth: W,
-    borderRadius: 12,
-    border: "1px solid #1d2a47",
-  }}
-/>
-     
-      <div style={{ width: "100%", display: "flex", flexWrap: "wrap", gap: 10 }}>
-        {rows.map(([label, val, color]) => (
-          <div key={label} style={{ background: "#0f1730", borderRadius: 10, padding: "8px 12px" }}>
-            <div style={{ fontSize: 12, color: "#8fa0c4" }}>{label}</div>
-            <div style={{ fontSize: 20, fontWeight: 700, color }}>{val}</div>
-          </div>
-        ))}
-        <div style={{ background: "#0f1730", borderRadius: 10, padding: "8px 12px" }}>
-          <div style={{ fontSize: 12, color: "#8fa0c4" }}>Fuel</div>
-          <div style={{ height: 10, background: "#1d2a47", borderRadius: 5, marginTop: 6 }}>
-            <div style={{ height: "100%", width: `${((hud.fuel ?? FUEL_START) / FUEL_START) * 100}%`, background: "#f0a830", borderRadius: 5 }} />
-          </div>
-        </div>
-        <p className="quote">“Small steps, big landings.”</p>
-        <div className="pilot">
-          <div className="creeper" aria-hidden="true" />
-          <div>
-            <strong>Mission 001</strong>
-            <span className={`tag ${paused ? "warn" : ""}`}>{paused ? "Paused" : "Live"}</span>
-          </div>
-        </div>
-
+        <strong className={tone ? `tone ${tone}` : ""}>{value}</strong>
       </div>
     </div>
+  );
+}
+
+/** Tiny live line chart used for the speed / angular-velocity panels. */
+function LineChart({ points, color, min, max, zero = false }) {
+  const CW = 320;
+  const CH = 96;
+  const padL = 8;
+  const padR = 8;
+  const padT = 10;
+  const padB = 12;
+  const span = Math.max(max - min, 1e-6);
+  const innerW = CW - padL - padR;
+  const innerH = CH - padT - padB;
+  const X = (i) => padL + (i / Math.max(points.length - 1, 1)) * innerW;
+  const Y = (v) => padT + (1 - (Math.min(max, Math.max(min, v)) - min) / span) * innerH;
+
+  const path = points
+    .map((p, i) => `${i ? "L" : "M"}${X(i).toFixed(1)},${Y(p).toFixed(1)}`)
+    .join(" ");
+  const last = points.length ? points[points.length - 1] : min;
+
+  return (
+    <svg
+      className="line-chart"
+      viewBox={`0 0 ${CW} ${CH}`}
+      role="img"
+      preserveAspectRatio="none"
+    >
+      {[0.25, 0.5, 0.75].map((f) => (
+        <line
+          key={f}
+          x1={padL}
+          x2={CW - padR}
+          y1={padT + f * innerH}
+          y2={padT + f * innerH}
+          className="chart-grid"
+        />
+      ))}
+      <line x1={padL} x2={CW - padR} y1={padT + innerH} y2={padT + innerH} className="chart-axis" />
+      {zero && (
+        <line x1={padL} x2={CW - padR} y1={Y(0)} y2={Y(0)} className="chart-zero" />
+      )}
+      {points.length > 1 && <path d={path} className="chart-line" style={{ stroke: color }} />}
+      <circle cx={X(Math.max(points.length - 1, 0))} cy={Y(last)} r="3.5" fill={color} />
+    </svg>
   );
 }
