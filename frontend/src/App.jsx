@@ -966,7 +966,7 @@ const MAX_VY = 45, MAX_VX = 25, MAX_ANGLE = 0.21; // ~12 degrees
 
 // ---------- Terrain ----------
 function makeTerrain() {
-  const N = 48
+  const N = 48;
   seg = W / N;
   const pts = [];
   let y = H - 110;
